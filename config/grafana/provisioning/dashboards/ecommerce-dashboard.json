@@ -1,0 +1,75 @@
+{
+  "dashboard": {
+    "id": null,
+    "title": "E-commerce Clickstream Analytics",
+    "tags": ["ecommerce", "clickstream", "analytics"],
+    "timezone": "browser",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Real-time Events",
+        "type": "stat",
+        "targets": [
+          {
+            "rawSql": "SELECT COUNT(*) FROM analytics.raw_events WHERE timestamp > NOW() - INTERVAL '1 hour'",
+            "format": "time_series",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "thresholds"
+            },
+            "thresholds": {
+              "steps": [
+                {"color": "green", "value": null},
+                {"color": "red", "value": 80}
+              ]
+            }
+          }
+        },
+        "gridPos": {"h": 8, "w": 6, "x": 0, "y": 0}
+      },
+      {
+        "id": 2,
+        "title": "Conversion Rate",
+        "type": "stat",
+        "targets": [
+          {
+            "rawSql": "SELECT conversion_rate FROM analytics.hourly_metrics ORDER BY hour_timestamp DESC LIMIT 1",
+            "format": "time_series",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "color": {
+              "mode": "thresholds"
+            }
+          }
+        },
+        "gridPos": {"h": 8, "w": 6, "x": 6, "y": 0}
+      },
+      {
+        "id": 3,
+        "title": "Hourly Traffic",
+        "type": "timeseries",
+        "targets": [
+          {
+            "rawSql": "SELECT hour_timestamp as time, total_events FROM analytics.hourly_metrics ORDER BY hour_timestamp",
+            "format": "time_series",
+            "refId": "A"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8}
+      }
+    ],
+    "time": {
+      "from": "now-6h",
+      "to": "now"
+    },
+    "refresh": "30s"
+  }
+}

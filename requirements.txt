@@ -1,0 +1,16 @@
+# Core dependencies
+kafka-python==2.0.2
+pyspark==3.5.0
+psycopg2-binary==2.9.7
+faker==19.12.0
+python-dotenv==1.0.0
+
+# Development and data analysis
+pandas==2.1.1
+jupyter==1.0.0
+sqlalchemy==2.0.21
+
+# Code quality
+black==23.9.1
+flake8==6.1.0
+pytest==7.4.2
