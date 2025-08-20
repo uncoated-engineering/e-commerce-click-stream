@@ -1,5 +1,6 @@
 """
-Spark Structured Streaming job for processing e-commerce clickstream events.
+Fixed Spark Structured Streaming job for processing e-commerce clickstream events.
+Addresses schema mismatches with PostgreSQL database.
 """
 import logging
 import os
@@ -10,10 +11,10 @@ from pyspark.sql.functions import (
     col, from_json, to_timestamp, window, count, sum as spark_sum,
     avg, max as spark_max, min as spark_min, when, lit, 
     collect_list, size, first, last, unix_timestamp,
-    current_timestamp, expr
+    current_timestamp, expr, regexp_replace, coalesce, approx_count_distinct
 )
 from pyspark.sql.types import (
-    StructType, StructField, StringType, TimestampType, IntegerType
+    StructType, StructField, StringType, TimestampType, IntegerType, DecimalType
 )
 
 
@@ -49,13 +50,13 @@ class ClickstreamProcessor:
         # Initialize Spark session
         self.spark = self._create_spark_session()
         
-        # Define schema for incoming JSON events
+        # Define schema for incoming JSON events - matching PostgreSQL expectations
         self.event_schema = StructType([
-            StructField("event_id", StringType(), True),
-            StructField("user_id", StringType(), True),
-            StructField("event_type", StringType(), True),
+            StructField("event_id", StringType(), False),  # Changed to NOT NULL
+            StructField("user_id", StringType(), False),   # Changed to NOT NULL  
+            StructField("event_type", StringType(), False), # Changed to NOT NULL
             StructField("product_id", StringType(), True),
-            StructField("timestamp", StringType(), True),
+            StructField("timestamp", StringType(), False),  # Changed to NOT NULL
             StructField("session_id", StringType(), True),
             StructField("page_url", StringType(), True),
             StructField("user_agent", StringType(), True),
@@ -105,6 +106,17 @@ class ClickstreamProcessor:
             logger.error(f"Failed to read from Kafka: {e}")
             raise
     
+    def validate_uuid(self, df: DataFrame, uuid_column: str) -> DataFrame:
+        """Validate and clean UUID format to match PostgreSQL expectations."""
+        # Remove any non-UUID characters and ensure proper format
+        return df.withColumn(
+            uuid_column,
+            regexp_replace(col(uuid_column), "[^a-fA-F0-9-]", "")
+        ).filter(
+            # Basic UUID format validation (8-4-4-4-12)
+            col(uuid_column).rlike("^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$")
+        )
+    
     def parse_events(self, df: DataFrame) -> DataFrame:
         """Parse JSON events from Kafka and apply transformations."""
         # Parse JSON from Kafka value
@@ -113,13 +125,33 @@ class ClickstreamProcessor:
             col("timestamp").alias("kafka_timestamp")
         ).select("event.*", "kafka_timestamp")
         
-        # Convert timestamp string to timestamp type
+        # Convert timestamp string to timestamp type and add created_at
         transformed_df = parsed_df.withColumn(
             "timestamp", 
             to_timestamp(col("timestamp"), "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'")
         ).withColumn(
             "processing_time", 
             current_timestamp()
+        ).withColumn(
+            "created_at",  # Add created_at column for PostgreSQL
+            current_timestamp()
+        )
+        
+        # Validate UUID columns
+        transformed_df = self.validate_uuid(transformed_df, "event_id")
+        transformed_df = self.validate_uuid(transformed_df, "user_id")
+        
+        # Validate product_id and session_id only if not null
+        transformed_df = transformed_df.withColumn(
+            "product_id",
+            when(col("product_id").isNotNull(), 
+                 regexp_replace(col("product_id"), "[^a-fA-F0-9-]", ""))
+            .otherwise(col("product_id"))
+        ).withColumn(
+            "session_id",
+            when(col("session_id").isNotNull(), 
+                 regexp_replace(col("session_id"), "[^a-fA-F0-9-]", ""))
+            .otherwise(col("session_id"))
         )
         
         return transformed_df
@@ -129,7 +161,21 @@ class ClickstreamProcessor:
         def write_to_postgres(batch_df, batch_id):
             try:
                 if batch_df.count() > 0:
-                    batch_df.write \
+                    # Select only columns that exist in PostgreSQL table
+                    postgres_df = batch_df.select(
+                        col("event_id").cast("string"),
+                        col("user_id").cast("string"), 
+                        col("event_type").cast("string"),
+                        col("product_id").cast("string"),
+                        col("timestamp"),
+                        col("session_id").cast("string"),
+                        col("page_url").cast("string"),
+                        col("user_agent").cast("string"),
+                        col("ip_address").cast("string"),
+                        col("created_at")
+                    )
+                    
+                    postgres_df.write \
                         .format("jdbc") \
                         .option("url", self.postgres_url) \
                         .option("dbtable", "analytics.raw_events") \
@@ -153,7 +199,7 @@ class ClickstreamProcessor:
         return query
     
     def calculate_session_metrics(self, df: DataFrame) -> DataFrame:
-        """Calculate user session metrics."""
+        """Calculate user session metrics with proper data types for PostgreSQL."""
         session_metrics = df.groupBy("session_id", "user_id") \
             .agg(
                 spark_min("timestamp").alias("start_time"),
@@ -162,11 +208,12 @@ class ClickstreamProcessor:
                 spark_sum(when(col("event_type") == "page_view", 1).otherwise(0)).alias("page_views"),
                 spark_sum(when(col("event_type") == "add_to_cart", 1).otherwise(0)).alias("add_to_cart_events"),
                 spark_sum(when(col("event_type") == "purchase", 1).otherwise(0)).alias("purchases"),
-                current_timestamp().alias("updated_at")
+                current_timestamp().alias("updated_at"),
+                current_timestamp().alias("created_at")  # Add created_at
             ) \
             .withColumn(
                 "session_duration_minutes",
-                (unix_timestamp("end_time") - unix_timestamp("start_time")) / 60
+                ((unix_timestamp("end_time") - unix_timestamp("start_time")) / 60).cast("integer")
             ) \
             .withColumn(
                 "converted",
@@ -174,39 +221,33 @@ class ClickstreamProcessor:
             ) \
             .withColumn(
                 "total_purchase_amount",
-                col("purchases") * 25.99  # Simplified: assume average order value
+                (col("purchases") * 25.99).cast(DecimalType(10, 2))  # Match PostgreSQL DECIMAL(10,2)
             )
         
         return session_metrics
     
     def write_session_metrics(self, df: DataFrame) -> None:
-        """Write session metrics to PostgreSQL with upsert logic."""
+        """Write session metrics to PostgreSQL."""
         def upsert_session_metrics(batch_df, batch_id):
             try:
                 if batch_df.count() > 0:
-                    # Create temporary table
-                    batch_df.createOrReplaceTempView("temp_session_metrics")
+                    # Select and cast columns to match PostgreSQL schema
+                    postgres_df = batch_df.select(
+                        col("session_id").cast("string"),
+                        col("user_id").cast("string"),
+                        col("start_time"),
+                        col("end_time"),
+                        col("session_duration_minutes").cast("integer"),
+                        col("page_views").cast("integer"),
+                        col("add_to_cart_events").cast("integer"), 
+                        col("purchases").cast("integer"),
+                        col("total_purchase_amount"),
+                        col("converted").cast("boolean"),
+                        col("created_at"),
+                        col("updated_at")
+                    )
                     
-                    # Use PostgreSQL UPSERT (ON CONFLICT DO UPDATE)
-                    upsert_query = """
-                    INSERT INTO analytics.user_sessions (
-                        session_id, user_id, start_time, end_time, session_duration_minutes,
-                        page_views, add_to_cart_events, purchases, total_purchase_amount, 
-                        converted, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT (session_id) DO UPDATE SET
-                        end_time = EXCLUDED.end_time,
-                        session_duration_minutes = EXCLUDED.session_duration_minutes,
-                        page_views = EXCLUDED.page_views,
-                        add_to_cart_events = EXCLUDED.add_to_cart_events,
-                        purchases = EXCLUDED.purchases,
-                        total_purchase_amount = EXCLUDED.total_purchase_amount,
-                        converted = EXCLUDED.converted,
-                        updated_at = EXCLUDED.updated_at
-                    """
-                    
-                    # For simplicity, use overwrite mode (in production, use proper upsert)
-                    batch_df.write \
+                    postgres_df.write \
                         .format("jdbc") \
                         .option("url", self.postgres_url) \
                         .option("dbtable", "analytics.user_sessions") \
@@ -231,7 +272,7 @@ class ClickstreamProcessor:
         return query
     
     def calculate_hourly_metrics(self, df: DataFrame) -> DataFrame:
-        """Calculate hourly aggregated metrics."""
+        """Calculate hourly aggregated metrics with proper data types."""
         hourly_metrics = df \
             .withWatermark("timestamp", "10 minutes") \
             .groupBy(
@@ -239,20 +280,25 @@ class ClickstreamProcessor:
             ) \
             .agg(
                 count("*").alias("total_events"),
-                expr("count(distinct user_id)").alias("unique_users"),
+                approx_count_distinct("user_id").alias("unique_users"),
                 spark_sum(when(col("event_type") == "page_view", 1).otherwise(0)).alias("page_views"),
                 spark_sum(when(col("event_type") == "add_to_cart", 1).otherwise(0)).alias("cart_additions"),
                 spark_sum(when(col("event_type") == "purchase", 1).otherwise(0)).alias("purchases"),
             ) \
             .select(
                 col("hour_window.start").alias("hour_timestamp"),
-                col("total_events"),
-                col("unique_users"),
-                col("page_views"),
-                col("cart_additions"),
-                col("purchases"),
-                (col("purchases").cast("double") / col("page_views").cast("double") * 100).alias("conversion_rate"),
-                (col("purchases") * 25.99).alias("revenue")  # Simplified revenue calculation
+                col("total_events").cast("integer"),
+                col("unique_users").cast("integer"),
+                col("page_views").cast("integer"),
+                col("cart_additions").cast("integer"),
+                col("purchases").cast("integer"),
+                # Safe division with null handling and proper decimal type
+                when(col("page_views") > 0, 
+                     (col("purchases").cast("double") / col("page_views").cast("double") * 100))
+                .otherwise(lit(0.0))
+                .cast(DecimalType(5, 4))
+                .alias("conversion_rate"),
+                (col("purchases") * 25.99).cast(DecimalType(12, 2)).alias("revenue")
             )
         
         return hourly_metrics
@@ -285,6 +331,65 @@ class ClickstreamProcessor:
         
         return query
     
+    def update_dashboard_metrics(self, df: DataFrame) -> None:
+        """Update real-time dashboard metrics."""
+        def update_dashboard_batch(batch_df, batch_id):
+            try:
+                if batch_df.count() > 0:
+                    # Calculate current metrics
+                    metrics = batch_df.agg(
+                        expr("count(distinct user_id)").alias("total_users"),
+                        expr("count(distinct session_id)").alias("total_sessions"),
+                        avg(when(col("event_type") == "purchase", 1.0).otherwise(0.0)).alias("conversion_rate"),
+                        avg("session_duration_minutes").alias("avg_session_duration")
+                    ).collect()[0]
+                    
+                    # Create dashboard updates DataFrame
+                    dashboard_updates = self.spark.createDataFrame([
+                        ("total_users", float(metrics["total_users"] or 0), "Total Active Users"),
+                        ("total_sessions", float(metrics["total_sessions"] or 0), "Total Sessions"), 
+                        ("conversion_rate", float(metrics["conversion_rate"] or 0) * 100, "Overall Conversion Rate (%)"),
+                        ("avg_session_duration", float(metrics["avg_session_duration"] or 0), "Average Session Duration (minutes)")
+                    ], ["metric_key", "metric_value", "metric_label"])
+                    
+                    dashboard_updates = dashboard_updates.withColumn(
+                        "last_updated", current_timestamp()
+                    ).withColumn(
+                        "metric_value", col("metric_value").cast(DecimalType(15, 4))
+                    )
+                    
+                    # Write to dashboard metrics (using overwrite for simplicity)
+                    dashboard_updates.write \
+                        .format("jdbc") \
+                        .option("url", self.postgres_url) \
+                        .option("dbtable", "analytics.dashboard_metrics") \
+                        .option("user", self.postgres_user) \
+                        .option("password", self.postgres_password) \
+                        .option("driver", "org.postgresql.Driver") \
+                        .mode("append") \
+                        .save()
+                    
+                    logger.info(f"Batch {batch_id}: Updated dashboard metrics")
+                    
+            except Exception as e:
+                logger.error(f"Failed to update dashboard metrics batch {batch_id}: {e}")
+        
+        # Aggregate session metrics for dashboard updates
+        dashboard_df = df.groupBy("session_id").agg(
+            first("user_id").alias("user_id"),
+            first("event_type").alias("event_type"),
+            ((unix_timestamp(spark_max("timestamp")) - unix_timestamp(spark_min("timestamp"))) / 60).alias("session_duration_minutes")
+        )
+        
+        query = dashboard_df.writeStream \
+            .outputMode("update") \
+            .foreachBatch(update_dashboard_batch) \
+            .option("checkpointLocation", f"{self.checkpoint_location}/dashboard_metrics") \
+            .trigger(processingTime="2 minutes") \
+            .start()
+        
+        return query
+    
     def run(self) -> None:
         """Run the complete streaming pipeline."""
         try:
@@ -306,6 +411,9 @@ class ClickstreamProcessor:
             # Calculate and write hourly metrics
             hourly_metrics = self.calculate_hourly_metrics(parsed_events)
             hourly_query = self.write_hourly_metrics(hourly_metrics)
+            
+            # Update dashboard metrics
+            dashboard_query = self.update_dashboard_metrics(parsed_events)
             
             logger.info("All streaming queries started successfully")
             
