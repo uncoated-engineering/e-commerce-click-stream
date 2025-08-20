@@ -3,22 +3,22 @@ CREATE SCHEMA IF NOT EXISTS analytics;
 
 -- Raw events table (for backup/audit)
 CREATE TABLE IF NOT EXISTS analytics.raw_events (
-    event_id UUID PRIMARY KEY,
-    user_id UUID NOT NULL,
+    event_id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
     event_type VARCHAR(50) NOT NULL,
-    product_id UUID,
-    timestamp TIMESTAMP WITH TIME ZONE NOT NULL,
-    session_id UUID,
+    product_id TEXT,
+    timestamp TEXT,
+    session_id TEXT,
     page_url VARCHAR(500),
     user_agent VARCHAR(500),
-    ip_address INET,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    ip_address TEXT,
+    created_at TEXT
 );
 
 -- User session metrics
 CREATE TABLE IF NOT EXISTS analytics.user_sessions (
-    session_id UUID PRIMARY KEY,
-    user_id UUID NOT NULL,
+    session_id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
     start_time TIMESTAMP WITH TIME ZONE NOT NULL,
     end_time TIMESTAMP WITH TIME ZONE,
     session_duration_minutes INTEGER,
@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS analytics.user_sessions (
 
 -- Product metrics
 CREATE TABLE IF NOT EXISTS analytics.product_metrics (
-    product_id UUID PRIMARY KEY,
+    product_id TEXT PRIMARY KEY,
     product_name VARCHAR(200),
     category VARCHAR(100),
     total_views INTEGER DEFAULT 0,
