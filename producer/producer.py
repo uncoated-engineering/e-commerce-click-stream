@@ -6,7 +6,7 @@ import logging
 import os
 import random
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
 from kafka import KafkaProducer
@@ -65,7 +65,8 @@ class ClickstreamProducer:
     
     def _should_end_session(self, session: UserSession) -> bool:
         """Determine if a user session should end."""
-        session_duration = datetime.utcnow() - session.start_time
+        current_time = datetime.now(timezone.utc)
+        session_duration = current_time - session.start_time
         
         # End session after 5-30 minutes with some probability
         if session_duration > timedelta(minutes=5):
@@ -75,7 +76,7 @@ class ClickstreamProducer:
             return random.random() < end_probability
         
         return False
-    
+        
     def _create_new_session(self) -> UserSession:
         """Create a new user session."""
         user_id = self.data_generator.generate_user_id()
@@ -114,7 +115,7 @@ class ClickstreamProducer:
         # Generate page URL
         page_url = self.data_generator.generate_page_url(event_type, product_id)
         
-        # Create the event
+        # Create the event with current timestamp
         event = ClickstreamEvent.create(
             user_id=session.user_id,
             event_type=event_type,
@@ -123,10 +124,13 @@ class ClickstreamProducer:
             page_url=page_url,
             user_agent=self.data_generator.generate_user_agent(),
             ip_address=self.data_generator.generate_ip_address(),
+            timestamp=datetime.utcnow(),  # Ensure we have a timestamp
         )
         
         # Update session state
         session.current_page = page_url
+        session.add_event(event_type)  # Track event counts
+        
         if event_type == "add_to_cart" and product_id:
             session.cart_items.append(product_id)
         elif event_type == "purchase":
