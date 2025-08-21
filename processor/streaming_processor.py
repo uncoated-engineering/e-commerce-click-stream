@@ -17,8 +17,6 @@ from pyspark.sql.types import (
     StructType, StructField, StringType, TimestampType, IntegerType, DecimalType
 )
 
-from processor.schema_validator import SchemaValidator, validate_raw_events_schema, validate_session_metrics_schema, validate_hourly_metrics_schema
-
 
 # Configure logging
 logging.basicConfig(
@@ -249,18 +247,6 @@ class ClickstreamProcessor:
         def upsert_session_metrics(batch_df, batch_id):
             try:
                 if batch_df.count() > 0:
-                    # Validate schema before writing
-                    is_compatible, issues = validate_session_metrics_schema(batch_df)
-                    if not is_compatible:
-                        logger.warning(f"Schema validation issues found for user_sessions batch {batch_id}:")
-                        fixes = SchemaValidator.suggest_fixes(issues)
-                        for fix in fixes:
-                            logger.warning(f"  Fix: {fix['issue']} -> {fix['fix']}")
-                    
-                    # Apply schema fixes to prevent write errors
-                    # Fix 1: Convert start_time to string to match PostgreSQL TEXT type
-                    batch_df = batch_df.withColumn("start_time", col("start_time").cast("string"))
-                    
                     # Select and cast columns to match PostgreSQL schema
                     postgres_df = batch_df.select(
                         col("session_id").cast("string"),
