@@ -17,6 +17,8 @@ from pyspark.sql.types import (
     StructType, StructField, StringType, TimestampType, IntegerType, DecimalType
 )
 
+from processor.schema_validator import SchemaValidator, validate_raw_events_schema, validate_session_metrics_schema, validate_hourly_metrics_schema
+
 
 # Configure logging
 logging.basicConfig(
@@ -56,7 +58,7 @@ class ClickstreamProcessor:
             StructField("user_id", StringType(), False),   # Changed to NOT NULL  
             StructField("event_type", StringType(), False), # Changed to NOT NULL
             StructField("product_id", StringType(), True),
-            StructField("timestamp", StringType(), False),  # Changed to NOT NULL
+            StructField("timestamp", StringType(), True),  # Allow null in parsing, handle later
             StructField("session_id", StringType(), True),
             StructField("page_url", StringType(), True),
             StructField("user_agent", StringType(), True),
@@ -126,9 +128,13 @@ class ClickstreamProcessor:
         ).select("event.*", "kafka_timestamp")
         
         # Convert timestamp string to timestamp type and add created_at
+        # Handle cases where timestamp might be missing/null by using current timestamp
         transformed_df = parsed_df.withColumn(
             "timestamp", 
-            to_timestamp(col("timestamp"), "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'")
+            when(
+                col("timestamp").isNotNull() & (col("timestamp") != ""),
+                to_timestamp(col("timestamp"), "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'")
+            ).otherwise(current_timestamp())
         ).withColumn(
             "processing_time", 
             current_timestamp()
@@ -161,13 +167,25 @@ class ClickstreamProcessor:
         def write_to_postgres(batch_df, batch_id):
             try:
                 if batch_df.count() > 0:
+                    # Validate schema before writing
+                    is_compatible, issues = validate_raw_events_schema(batch_df)
+                    if not is_compatible:
+                        logger.warning(f"Schema validation issues found for raw_events batch {batch_id}:")
+                        fixes = SchemaValidator.suggest_fixes(issues)
+                        for fix in fixes:
+                            logger.warning(f"  Fix: {fix['issue']} -> {fix['fix']}")
+                    
+                    # Apply schema fixes to prevent write errors
+                    # Fix 1: Convert timestamp to string to match PostgreSQL TEXT type
+                    batch_df = batch_df.withColumn("timestamp", col("timestamp").cast("string"))
+                    
                     # Select only columns that exist in PostgreSQL table
                     postgres_df = batch_df.select(
                         col("event_id").cast("string"),
                         col("user_id").cast("string"), 
                         col("event_type").cast("string"),
                         col("product_id").cast("string"),
-                        col("timestamp"),
+                        col("timestamp"),  # Now properly cast to string
                         col("session_id").cast("string"),
                         col("page_url").cast("string"),
                         col("user_agent").cast("string"),
@@ -193,7 +211,7 @@ class ClickstreamProcessor:
             .outputMode("append") \
             .foreachBatch(write_to_postgres) \
             .option("checkpointLocation", f"{self.checkpoint_location}/raw_events") \
-            .trigger(processingTime="30 seconds") \
+            .trigger(processingTime="90 seconds") \
             .start()
         
         return query
@@ -231,12 +249,24 @@ class ClickstreamProcessor:
         def upsert_session_metrics(batch_df, batch_id):
             try:
                 if batch_df.count() > 0:
+                    # Validate schema before writing
+                    is_compatible, issues = validate_session_metrics_schema(batch_df)
+                    if not is_compatible:
+                        logger.warning(f"Schema validation issues found for user_sessions batch {batch_id}:")
+                        fixes = SchemaValidator.suggest_fixes(issues)
+                        for fix in fixes:
+                            logger.warning(f"  Fix: {fix['issue']} -> {fix['fix']}")
+                    
+                    # Apply schema fixes to prevent write errors
+                    # Fix 1: Convert start_time to string to match PostgreSQL TEXT type
+                    batch_df = batch_df.withColumn("start_time", col("start_time").cast("string"))
+                    
                     # Select and cast columns to match PostgreSQL schema
                     postgres_df = batch_df.select(
                         col("session_id").cast("string"),
                         col("user_id").cast("string"),
-                        col("start_time"),
-                        col("end_time"),
+                        col("start_time"),  # Now properly cast to string
+                        col("end_time").cast("timestamp"),  # Ensure proper timestamp type
                         col("session_duration_minutes").cast("integer"),
                         col("page_views").cast("integer"),
                         col("add_to_cart_events").cast("integer"), 
@@ -254,7 +284,7 @@ class ClickstreamProcessor:
                         .option("user", self.postgres_user) \
                         .option("password", self.postgres_password) \
                         .option("driver", "org.postgresql.Driver") \
-                        .mode("append") \
+                        .mode("overwrite") \
                         .save()
                     
                     logger.info(f"Batch {batch_id}: Updated {batch_df.count()} session metrics")
@@ -366,7 +396,7 @@ class ClickstreamProcessor:
                         .option("user", self.postgres_user) \
                         .option("password", self.postgres_password) \
                         .option("driver", "org.postgresql.Driver") \
-                        .mode("append") \
+                        .mode("overwrite") \
                         .save()
                     
                     logger.info(f"Batch {batch_id}: Updated dashboard metrics")
@@ -385,7 +415,7 @@ class ClickstreamProcessor:
             .outputMode("update") \
             .foreachBatch(update_dashboard_batch) \
             .option("checkpointLocation", f"{self.checkpoint_location}/dashboard_metrics") \
-            .trigger(processingTime="2 minutes") \
+            .trigger(processingTime="3 minutes") \
             .start()
         
         return query
