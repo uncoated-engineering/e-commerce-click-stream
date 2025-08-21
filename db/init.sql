@@ -12,14 +12,14 @@ CREATE TABLE IF NOT EXISTS analytics.raw_events (
     page_url VARCHAR(500),
     user_agent VARCHAR(500),
     ip_address TEXT,
-    created_at TEXT
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
 -- User session metrics
 CREATE TABLE IF NOT EXISTS analytics.user_sessions (
     session_id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,
-    start_time TIMESTAMP WITH TIME ZONE NOT NULL,
+    start_time TEXT,
     end_time TIMESTAMP WITH TIME ZONE,
     session_duration_minutes INTEGER,
     page_views INTEGER DEFAULT 0,
@@ -66,11 +66,11 @@ CREATE TABLE IF NOT EXISTS analytics.dashboard_metrics (
 );
 
 -- Create indexes for better query performance
-CREATE INDEX IF NOT EXISTS idx_raw_events_timestamp ON analytics.raw_events(timestamp);
+-- CREATE INDEX IF NOT EXISTS idx_raw_events_timestamp ON analytics.raw_events(timestamp);
 CREATE INDEX IF NOT EXISTS idx_raw_events_user_id ON analytics.raw_events(user_id);
 CREATE INDEX IF NOT EXISTS idx_raw_events_event_type ON analytics.raw_events(event_type);
 CREATE INDEX IF NOT EXISTS idx_user_sessions_user_id ON analytics.user_sessions(user_id);
-CREATE INDEX IF NOT EXISTS idx_user_sessions_start_time ON analytics.user_sessions(start_time);
+-- CREATE INDEX IF NOT EXISTS idx_user_sessions_start_time ON analytics.user_sessions(start_time);
 
 -- Insert initial dashboard metrics
 INSERT INTO analytics.dashboard_metrics (metric_key, metric_value, metric_label) VALUES
