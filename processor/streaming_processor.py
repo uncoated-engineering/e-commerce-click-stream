@@ -51,10 +51,11 @@ class ClickstreamProcessor:
         
         # Define schema for incoming JSON events
         self.event_schema = StructType([
-            StructField("event_id", StringType(), False),  # Changed to NOT NULL
-            StructField("user_id", StringType(), False),   # Changed to NOT NULL  
-            StructField("event_type", StringType(), False), # Changed to NOT NULL
+            StructField("event_id", StringType(), False),
+            StructField("user_id", StringType(), False),
+            StructField("event_type", StringType(), False),
             StructField("product_id", StringType(), True),
+            StructField("purchase_amount", DecimalType(10, 2), True),
             StructField("timestamp", StringType(), True),
             StructField("session_id", StringType(), True),
             StructField("page_url", StringType(), True),
@@ -133,12 +134,6 @@ class ClickstreamProcessor:
             try:
                 if batch_df.count() > 0:
                     # Validate schema before writing
-                    is_compatible, issues = validate_raw_events_schema(batch_df)
-                    if not is_compatible:
-                        logger.warning(f"Schema validation issues found for raw_events batch {batch_id}:")
-                        fixes = SchemaValidator.suggest_fixes(issues)
-                        for fix in fixes:
-                            logger.warning(f"  Fix: {fix['issue']} -> {fix['fix']}")
                     
                     # Apply schema fixes to prevent write errors
                     # Fix 1: Convert timestamp to string to match PostgreSQL TEXT type
@@ -187,73 +182,67 @@ class ClickstreamProcessor:
             .agg(
                 spark_min("timestamp").alias("start_time"),
                 spark_max("timestamp").alias("end_time"),
-                count("*").alias("total_events"),
+                count("*" ).alias("total_events"),
                 spark_sum(when(col("event_type") == "page_view", 1).otherwise(0)).alias("page_views"),
                 spark_sum(when(col("event_type") == "add_to_cart", 1).otherwise(0)).alias("add_to_cart_events"),
                 spark_sum(when(col("event_type") == "purchase", 1).otherwise(0)).alias("purchases"),
-                current_timestamp().alias("updated_at"),
-                current_timestamp().alias("created_at")  # Add created_at
+                spark_sum("purchase_amount").alias("total_purchase_amount"),
+                first(current_timestamp()).alias("created_at"),
+                current_timestamp().alias("updated_at")
             ) \
             .withColumn(
-                "session_duration_minutes",
-                ((unix_timestamp("end_time") - unix_timestamp("start_time")) / 60).cast("integer")
+                "session_duration_seconds",
+                (unix_timestamp("end_time") - unix_timestamp("start_time")).cast("integer")
             ) \
             .withColumn(
                 "converted",
                 when(col("purchases") > 0, lit(True)).otherwise(lit(False))
-            ) \
-            .withColumn(
-                "total_purchase_amount",
-                (col("purchases") * 25.99).cast(DecimalType(10, 2))  # Match PostgreSQL DECIMAL(10,2)
             )
         
         return session_metrics
     
     def write_session_metrics(self, df: DataFrame) -> None:
         """Write session metrics to PostgreSQL with upsert logic."""
-        def upsert_session_metrics(batch_df, batch_id):
+        def write_batch_to_postgres(batch_df, batch_id):
             try:
                 if batch_df.count() > 0:
-                    # Create temporary table
-                    batch_df.createOrReplaceTempView("temp_session_metrics")
-                    
-                    # Use PostgreSQL UPSERT (ON CONFLICT DO UPDATE)
-                    upsert_query = """
-                    INSERT INTO analytics.user_sessions (
-                        session_id, user_id, start_time, end_time, session_duration_minutes,
-                        page_views, add_to_cart_events, purchases, total_purchase_amount, 
-                        converted, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT (session_id) DO UPDATE SET
-                        end_time = EXCLUDED.end_time,
-                        session_duration_minutes = EXCLUDED.session_duration_minutes,
-                        page_views = EXCLUDED.page_views,
-                        add_to_cart_events = EXCLUDED.add_to_cart_events,
-                        purchases = EXCLUDED.purchases,
-                        total_purchase_amount = EXCLUDED.total_purchase_amount,
-                        converted = EXCLUDED.converted,
-                        updated_at = EXCLUDED.updated_at
-                    """
-                    
-                    # For simplicity, use overwrite mode (in production, use proper upsert)
-                    batch_df.write \
+                    # Select and order columns to match the target table exactly
+                    output_df = batch_df.select(
+                        "session_id",
+                        "user_id",
+                        "start_time",
+                        "end_time",
+                        "session_duration_seconds",
+                        "page_views",
+                        "add_to_cart_events",
+                        "purchases",
+                        col("total_purchase_amount").cast(DecimalType(10, 2)),
+                        "converted",
+                        "total_events",
+                        "created_at",
+                        "updated_at"
+                    )
+
+                    output_df.write \
                         .format("jdbc") \
                         .option("url", self.postgres_url) \
-                        .option("dbtable", "analytics.user_sessions") \
+                        .option("dbtable", "session_metrics") \
                         .option("user", self.postgres_user) \
                         .option("password", self.postgres_password) \
                         .option("driver", "org.postgresql.Driver") \
                         .mode("append") \
                         .save()
                     
-                    logger.info(f"Batch {batch_id}: Updated {batch_df.count()} session metrics")
+                    logger.info(f"Batch {batch_id}: Wrote {output_df.count()} session metrics")
                     
             except Exception as e:
                 logger.error(f"Failed to write session metrics batch {batch_id}: {e}")
-        
+                if hasattr(e, 'java_exception'):
+                    logger.error(f"Java Exception: {e.java_exception}")
+
         query = df.writeStream \
             .outputMode("update") \
-            .foreachBatch(upsert_session_metrics) \
+            .foreachBatch(write_batch_to_postgres) \
             .option("checkpointLocation", f"{self.checkpoint_location}/session_metrics") \
             .trigger(processingTime="1 minute") \
             .start()
