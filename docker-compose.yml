@@ -73,6 +73,7 @@ services:
     image: bitnami/spark:3.5.0
     hostname: spark-master
     container_name: spark-master
+    command: /bin/bash -c "pip install psycopg2-binary && /opt/bitnami/spark/sbin/start-master.sh"
     environment:
       - SPARK_MODE=master
       - SPARK_RPC_AUTHENTICATION_ENABLED=no
