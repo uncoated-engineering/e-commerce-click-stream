@@ -11,6 +11,10 @@
         "type": "stat",
         "targets": [
           {
+            "datasource": {
+              "type": "postgres",
+              "uid": "postgres_ecommerce_ds"
+            },
             "rawSql": "SELECT COUNT(*) FROM analytics.raw_events WHERE timestamp > NOW() - INTERVAL '1 hour'",
             "format": "time_series",
             "refId": "A"
@@ -37,6 +41,10 @@
         "type": "stat",
         "targets": [
           {
+            "datasource": {
+              "type": "postgres",
+              "uid": "postgres_ecommerce_ds"
+            },
             "rawSql": "SELECT conversion_rate FROM analytics.hourly_metrics ORDER BY hour_timestamp DESC LIMIT 1",
             "format": "time_series",
             "refId": "A"
@@ -58,6 +66,10 @@
         "type": "timeseries",
         "targets": [
           {
+            "datasource": {
+              "type": "postgres",
+              "uid": "postgres_ecommerce_ds"
+            },
             "rawSql": "SELECT hour_timestamp as time, total_events FROM analytics.hourly_metrics ORDER BY hour_timestamp",
             "format": "time_series",
             "refId": "A"

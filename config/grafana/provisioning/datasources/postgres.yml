@@ -2,6 +2,7 @@ apiVersion: 1
 
 datasources:
   - name: PostgreSQL
+    uid: postgres_ecommerce_ds
     type: postgres
     url: postgres:5432
     database: ecommerce_analytics
