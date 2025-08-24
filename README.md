@@ -136,6 +136,10 @@ The pipeline calculates several key metrics:
 - Average order value
 - User engagement metrics
 
+<img width="784" height="251" alt="image" src="https://github.com/user-attachments/assets/0b7b7a75-8e0e-47db-b593-b8909d6d82ea" />
+
+
+
 ## 🛠️ Development
 
 ### Project Structure
