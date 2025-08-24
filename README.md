@@ -158,20 +158,6 @@ The pipeline calculates several key metrics:
 └── requirements.txt      # Python dependencies
 ```
 
-### Running Tests
-```bash
-pytest tests/
-```
-
-### Code Quality
-```bash
-# Format code
-black .
-
-# Lint code  
-flake8 .
-```
-
 ## 🔍 Monitoring & Debugging
 
 ### Check Kafka Messages
