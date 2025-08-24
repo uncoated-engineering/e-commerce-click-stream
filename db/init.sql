@@ -14,7 +14,7 @@ CREATE TABLE analytics.raw_events (
     session_id TEXT NOT NULL,
     page_url VARCHAR(500),
     user_agent VARCHAR(500),
-    ip_address INET,
+    ip_address VARCHAR(45),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -30,6 +30,7 @@ CREATE TABLE analytics.user_sessions (
     purchases INTEGER DEFAULT 0,
     total_purchase_amount DECIMAL(10,2) DEFAULT 0,
     converted BOOLEAN DEFAULT FALSE,
+    total_events INTEGER DEFAULT 0,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );

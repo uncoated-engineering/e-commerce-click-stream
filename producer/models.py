@@ -17,6 +17,7 @@ class ClickstreamEvent:
     product_id: Optional[str]
     timestamp: datetime
     session_id: str
+    purchase_amount: Optional[float] = None
     page_url: Optional[str] = None
     user_agent: Optional[str] = None
     ip_address: Optional[str] = None
@@ -28,6 +29,7 @@ class ClickstreamEvent:
         event_type: str,
         session_id: str,
         product_id: Optional[str] = None,
+        purchase_amount: Optional[float] = None,
         page_url: Optional[str] = None,
         user_agent: Optional[str] = None,
         ip_address: Optional[str] = None,
@@ -42,6 +44,7 @@ class ClickstreamEvent:
             user_id=user_id,
             event_type=event_type,
             product_id=product_id,
+            purchase_amount=purchase_amount,
             timestamp=timestamp,
             session_id=session_id,
             page_url=page_url,

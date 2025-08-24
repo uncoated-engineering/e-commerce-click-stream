@@ -108,9 +108,32 @@ class ClickstreamProducer:
         # Generate product ID if needed
         product_id = None
         if event_type in ["add_to_cart", "purchase"]:
-            product_id = self.data_generator.generate_product_id()
+            # If purchasing, try to use an item from the cart
+            if event_type == "purchase" and session.cart_items:
+                product_id = random.choice(session.cart_items)
+            else:
+                product_id = self.data_generator.generate_product_id()
         elif event_type == "page_view" and random.random() < 0.6:
             product_id = self.data_generator.generate_product_id()
+
+        # Generate purchase amount if it's a purchase event
+        purchase_amount = None
+        if event_type == "purchase":
+            # Realistic purchase amount based on cart or random
+            if session.cart_items:
+                purchase_amount = 0
+                for pid in session.cart_items:
+                    product_info = self.data_generator.get_product_info(pid)
+                    if product_info:
+                        purchase_amount += product_info.get("price", 0)
+                # Add a small random factor
+                purchase_amount *= random.uniform(0.95, 1.05)
+            else:
+                # If cart is empty, generate a random amount
+                purchase_amount = round(random.uniform(20.0, 500.0), 2)
+
+            if purchase_amount:
+                purchase_amount = round(purchase_amount, 2)
         
         # Generate page URL
         page_url = self.data_generator.generate_page_url(event_type, product_id)
@@ -121,6 +144,7 @@ class ClickstreamProducer:
             event_type=event_type,
             session_id=session.session_id,
             product_id=product_id,
+            purchase_amount=purchase_amount,
             page_url=page_url,
             user_agent=self.data_generator.generate_user_agent(),
             ip_address=self.data_generator.generate_ip_address(),

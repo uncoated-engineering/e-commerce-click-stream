@@ -119,7 +119,7 @@ class ClickstreamProcessor:
             "timestamp", 
             when(
                 col("timestamp").isNotNull() & (col("timestamp") != ""),
-                to_timestamp(col("timestamp"), "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'")
+                to_timestamp(col("timestamp"))
             ).otherwise(current_timestamp())
         ).withColumn(
             "processing_time", 
@@ -133,24 +133,17 @@ class ClickstreamProcessor:
         def write_to_postgres(batch_df, batch_id):
             try:
                 if batch_df.count() > 0:
-                    # Validate schema before writing
-                    
-                    # Apply schema fixes to prevent write errors
-                    # Fix 1: Convert timestamp to string to match PostgreSQL TEXT type
-                    batch_df = batch_df.withColumn("timestamp", col("timestamp").cast("string"))
-                    
                     # Select only columns that exist in PostgreSQL table
                     postgres_df = batch_df.select(
                         col("event_id").cast("string"),
                         col("user_id").cast("string"), 
                         col("event_type").cast("string"),
                         col("product_id").cast("string"),
-                        col("timestamp"),  # Now properly cast to string
+                        col("timestamp"),
                         col("session_id").cast("string"),
                         col("page_url").cast("string"),
                         col("user_agent").cast("string"),
-                        col("ip_address").cast("string"),
-                        col("created_at")
+                        col("ip_address").cast("string")
                     )
                     
                     postgres_df.write \
@@ -182,13 +175,11 @@ class ClickstreamProcessor:
             .agg(
                 spark_min("timestamp").alias("start_time"),
                 spark_max("timestamp").alias("end_time"),
-                count("*" ).alias("total_events"),
+                count("*").alias("total_events"),
                 spark_sum(when(col("event_type") == "page_view", 1).otherwise(0)).alias("page_views"),
                 spark_sum(when(col("event_type") == "add_to_cart", 1).otherwise(0)).alias("add_to_cart_events"),
                 spark_sum(when(col("event_type") == "purchase", 1).otherwise(0)).alias("purchases"),
-                spark_sum("purchase_amount").alias("total_purchase_amount"),
-                first(current_timestamp()).alias("created_at"),
-                current_timestamp().alias("updated_at")
+                spark_sum("purchase_amount").alias("total_purchase_amount")
             ) \
             .withColumn(
                 "session_duration_seconds",
@@ -197,54 +188,87 @@ class ClickstreamProcessor:
             .withColumn(
                 "converted",
                 when(col("purchases") > 0, lit(True)).otherwise(lit(False))
-            )
+            ) \
+            .withColumn("created_at", col("start_time")) \
+            .withColumn("updated_at", current_timestamp())
         
         return session_metrics
     
     def write_session_metrics(self, df: DataFrame) -> None:
-        """Write session metrics to PostgreSQL with upsert logic."""
-        def write_batch_to_postgres(batch_df, batch_id):
+        """Write session metrics to PostgreSQL with proper upsert logic."""
+        def write_upsert_batch(batch_df, batch_id):
+            # Persist the batch DataFrame to avoid recomputation
+            batch_df.persist()
+            
             try:
-                if batch_df.count() > 0:
-                    # Select and order columns to match the target table exactly
-                    output_df = batch_df.select(
-                        "session_id",
-                        "user_id",
-                        "start_time",
-                        "end_time",
-                        "session_duration_seconds",
-                        "page_views",
-                        "add_to_cart_events",
-                        "purchases",
-                        col("total_purchase_amount").cast(DecimalType(10, 2)),
-                        "converted",
-                        "total_events",
-                        "created_at",
-                        "updated_at"
-                    )
+                # Ensure column order and data types are correct
+                output_df = batch_df.select(
+                    "session_id", "user_id", "start_time", "end_time", 
+                    "session_duration_seconds", "page_views", "add_to_cart_events", 
+                    "purchases", col("total_purchase_amount").cast(DecimalType(10, 2)),
+                    "converted", "total_events", "created_at", "updated_at"
+                )
 
-                    output_df.write \
-                        .format("jdbc") \
-                        .option("url", self.postgres_url) \
-                        .option("dbtable", "session_metrics") \
-                        .option("user", self.postgres_user) \
-                        .option("password", self.postgres_password) \
-                        .option("driver", "org.postgresql.Driver") \
-                        .mode("append") \
-                        .save()
+                # Temp table name unique to this batch
+                temp_table_name = f"temp_sessions_{batch_id}"
+
+                # Write batch to a temporary table
+                output_df.write \
+                    .format("jdbc") \
+                    .option("url", self.postgres_url) \
+                    .option("dbtable", temp_table_name) \
+                    .option("user", self.postgres_user) \
+                    .option("password", self.postgres_password) \
+                    .option("driver", "org.postgresql.Driver") \
+                    .mode("overwrite") \
+                    .save()
+
+                # Use a separate psycopg2 connection to execute the UPSERT
+                import psycopg2
+                conn = None
+                try:
+                    conn = psycopg2.connect(
+                        host="postgres", dbname="ecommerce_analytics",
+                        user="analytics_user", password="analytics_password"
+                    )
+                    cursor = conn.cursor()
                     
-                    logger.info(f"Batch {batch_id}: Wrote {output_df.count()} session metrics")
-                    
-            except Exception as e:
-                logger.error(f"Failed to write session metrics batch {batch_id}: {e}")
-                if hasattr(e, 'java_exception'):
-                    logger.error(f"Java Exception: {e.java_exception}")
+                    upsert_sql = f"""
+                    INSERT INTO analytics.user_sessions (
+                        session_id, user_id, start_time, end_time, session_duration_seconds,
+                        page_views, add_to_cart_events, purchases, total_purchase_amount,
+                        converted, total_events, created_at, updated_at
+                    )
+                    SELECT
+                        session_id, user_id, start_time, end_time, session_duration_seconds,
+                        page_views, add_to_cart_events, purchases, total_purchase_amount,
+                        converted, total_events, created_at, updated_at
+                    FROM {temp_table_name}
+                    ON CONFLICT (session_id) DO UPDATE SET
+                        end_time = EXCLUDED.end_time,
+                        session_duration_seconds = EXCLUDED.session_duration_seconds,
+                        page_views = EXCLUDED.page_views,
+                        add_to_cart_events = EXCLUDED.add_to_cart_events,
+                        purchases = EXCLUDED.purchases,
+                        total_purchase_amount = EXCLUDED.total_purchase_amount,
+                        converted = EXCLUDED.converted,
+                        updated_at = EXCLUDED.updated_at;
+                    """
+                    cursor.execute(upsert_sql)
+                    cursor.execute(f"DROP TABLE {temp_table_name};")
+                    conn.commit()
+                    cursor.close()
+                    logger.info(f"Batch {batch_id}: Upserted {output_df.count()} session metrics.")
+                finally:
+                    if conn: conn.close()
+            finally:
+                batch_df.unpersist()
 
         query = df.writeStream \
             .outputMode("update") \
-            .foreachBatch(write_batch_to_postgres) \
+            .foreachBatch(write_upsert_batch) \
             .option("checkpointLocation", f"{self.checkpoint_location}/session_metrics") \
-            .trigger(processingTime="1 minute") \
+            .trigger(processingTime="3 minute") \
             .start()
         
         return query
@@ -262,6 +286,7 @@ class ClickstreamProcessor:
                 spark_sum(when(col("event_type") == "page_view", 1).otherwise(0)).alias("page_views"),
                 spark_sum(when(col("event_type") == "add_to_cart", 1).otherwise(0)).alias("cart_additions"),
                 spark_sum(when(col("event_type") == "purchase", 1).otherwise(0)).alias("purchases"),
+                spark_sum(when(col("event_type") == "purchase", col("purchase_amount")).otherwise(0)).alias("total_revenue")
             ) \
             .select(
                 col("hour_window.start").alias("hour_timestamp"),
@@ -274,9 +299,9 @@ class ClickstreamProcessor:
                 when(col("page_views") > 0, 
                      (col("purchases").cast("double") / col("page_views").cast("double") * 100))
                 .otherwise(lit(0.0))
-                .cast(DecimalType(5, 4))
+                .cast(DecimalType(5, 2))
                 .alias("conversion_rate"),
-                (col("purchases") * 25.99).cast(DecimalType(12, 2)).alias("revenue")
+                col("total_revenue").cast(DecimalType(12, 2)).alias("revenue")
             )
         
         return hourly_metrics
